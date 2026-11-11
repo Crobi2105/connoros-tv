@@ -21,7 +21,8 @@
   "use strict";
   var NS = "urn:x-cast:com.connoros.screen";
   var ctx = cast.framework.CastReceiverContext.getInstance();
-  var parts = {}, waiting = {}, reqN = 0, streams = [], early = [], booted = false;
+  var parts = {}, waiting = {}, reqN = 0, streams = [], early = [], booted = false, lastPart = 0;
+  var PAGE = Math.random().toString(36).slice(2, 10);      // this load of the page: the hub sends ConnorOS once per load
 
   function send(m) { try { ctx.sendCustomMessage(NS, undefined, m); } catch (e) {} }
   function say(t) { var s = document.getElementById("cos-say"); if (s) s.textContent = t; }
@@ -50,6 +51,7 @@
   }
 
   function boot(b) {
+    if (booted) return;                         // never start over once ConnorOS is running
     booted = true;
     window.EventSource = CastEventSource;
     window.fetch = castFetch;
@@ -71,12 +73,14 @@
   function handle(m) {
     if (!m || !m.t) return;
     if (m.t === "part") {                       // big messages come in parts
+      lastPart = Date.now();
+      if (m.b && booted) return;                 // a second copy of ConnorOS itself: it's already running, so ignore it
       var p = parts[m.id] = parts[m.id] || [];
       p[m.i] = m.d;
       var have = 0; for (var i = 0; i < m.n; i++) if (p[i] != null) have++;
       if (have === m.n) { delete parts[m.id]; handle(JSON.parse(p.join(""))); }
-      else if (!booted) say("Loading ConnorOS… " + Math.round(have / m.n * 100) + "%");
-      if (!booted && have === 1) send({t: "status", text: "receiving ConnorOS in " + m.n + " parts"});
+      else if (m.b && !booted) say("Loading ConnorOS… " + Math.round(have / m.n * 100) + "%");
+      if (m.b && !booted && have === 1) send({t: "status", text: "receiving ConnorOS in " + m.n + " parts"});
       return;
     }
     if (m.t === "bundle") boot(m);
@@ -87,15 +91,15 @@
 
   window.addEventListener("error", function (e) { send({t: "error", text: (e.message || "error") + " " + (e.filename || "") + ":" + (e.lineno || "")}); });
   ctx.addCustomMessageListener(NS, function (ev) { handle(typeof ev.data === "string" ? JSON.parse(ev.data) : ev.data); });
-  ctx.addEventListener(cast.framework.system.EventType.SENDER_CONNECTED, function () { if (!booted) { say("Connected to ConnorOS. Loading…"); send({t: "hello"}); } });
+  ctx.addEventListener(cast.framework.system.EventType.SENDER_CONNECTED, function () { if (!booted) { say("Connected to ConnorOS. Loading…"); send({t: "hello", page: PAGE}); } });
   var opts = new cast.framework.CastReceiverOptions();
   opts.customNamespaces = {};
   opts.customNamespaces[NS] = cast.framework.system.MessageType.JSON;
   opts.disableIdleTimeout = true;
   opts.skipPlayersLoad = true;
   ctx.start(opts);
-  setTimeout(function () { if (!booted) send({t: "hello"}); }, 1500);
-  setInterval(function () { if (!booted) send({t: "hello"}); }, 8000);
+  setTimeout(function () { if (!booted) send({t: "hello", page: PAGE}); }, 1500);
+  setInterval(function () { if (!booted && Date.now() - lastPart > 30000) send({t: "hello", page: PAGE}); }, 10000);   // ask again only if nothing has arrived for a while
 })();
 </script>
 </body>
