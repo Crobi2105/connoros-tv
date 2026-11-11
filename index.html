@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ConnorOS</title>
+<!-- ConnorOS on the TV. This is the page your Cast app points at (host it on GitHub Pages as index.html).
+     It holds no ConnorOS code: when it starts it says hello, and the ConnorOS hub sends it the Display over the
+     Chromecast's own connection, then keeps it up to date. So it never needs updating when ConnorOS does. -->
+<script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+<style>
+  html, body { margin: 0; height: 100%; background: #070608; color: #f4f1ea; overflow: hidden; }
+  #cos-splash { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font: 900 120px/1 "Helvetica Neue", Helvetica, Arial, sans-serif; letter-spacing: -.04em; }
+  #cos-splash small { font: 600 26px/1.4 "Helvetica Neue", Helvetica, Arial, sans-serif; letter-spacing: 0; color: #aaa49a; margin-top: 24px; }
+</style>
+</head>
+<body>
+<div id="cos-splash">cOS<small id="cos-say">Started. Waiting for the ConnorOS hub…</small></div>
+<script>
+(function () {
+  "use strict";
+  var NS = "urn:x-cast:com.connoros.screen";
+  var ctx = cast.framework.CastReceiverContext.getInstance();
+  var parts = {}, waiting = {}, reqN = 0, streams = [], early = [], booted = false;
+
+  function send(m) { try { ctx.sendCustomMessage(NS, undefined, m); } catch (e) {} }
+  function say(t) { var s = document.getElementById("cos-say"); if (s) s.textContent = t; }
+
+  /* the page's live connection (/events) and requests (/api, /log) go through the Chromecast to the hub */
+  function CastEventSource() { var me = this; me.readyState = 1; streams.push(me);
+    setTimeout(function () { if (me.onopen) me.onopen(); var e = early; early = []; e.forEach(deliver); }, 0); }
+  CastEventSource.prototype.close = function () { this.readyState = 2; streams = streams.filter(function (s) { return s !== this; }, this); };
+  CastEventSource.prototype.addEventListener = function (k, f) { if (k === "message") this.onmessage = f; else if (k === "open") this.onopen = f; };
+  function deliver(m) {
+    if (!streams.length) { early.push(m); return; }
+    var data = JSON.stringify(m);
+    streams.forEach(function (s) { if (s.onmessage) s.onmessage({data: data}); });
+  }
+  var realFetch = window.fetch ? window.fetch.bind(window) : null;
+  function castFetch(url, opts) {
+    var u = typeof url === "string" ? url : (url && url.url) || "";
+    if (!/^\//.test(u)) return realFetch ? realFetch(url, opts) : Promise.reject(new Error("offline"));
+    if (!/^\/(api|log)\b/.test(u)) return Promise.resolve(new Response("", {status: 404}));
+    var id = "r" + (++reqN);
+    return new Promise(function (ok) {
+      waiting[id] = ok;
+      send({t: "req", id: id, url: u, method: (opts && opts.method) || "GET", body: opts && opts.body ? String(opts.body) : null});
+      setTimeout(function () { if (waiting[id]) { delete waiting[id]; ok(new Response('{"ok":false,"error":"The hub didn\'t answer."}', {status: 504})); } }, 15000);
+    });
+  }
+
+  function boot(b) {
+    booted = true;
+    window.EventSource = CastEventSource;
+    window.fetch = castFetch;
+    try { history.replaceState(null, "", location.pathname + (b.canvas ? "?canvas=" + encodeURIComponent(b.canvas) : "")); } catch (e) {}
+    (b.fonts || []).forEach(function (href) { var l = document.createElement("link"); l.rel = "stylesheet"; l.href = href; document.head.appendChild(l); });
+    (b.styles || []).forEach(function (css) { var st = document.createElement("style"); st.textContent = css; document.head.appendChild(st); });
+    document.body.innerHTML = b.body;
+    document.body.setAttribute("data-display", "1");
+    document.body.setAttribute("data-tv", "1");
+    (b.scripts || []).forEach(function (code, i) {
+      var sc = document.createElement("script");
+      sc.textContent = code + "\n//# sourceURL=connoros-" + i + ".js";
+      document.body.appendChild(sc);
+    });
+    try { document.dispatchEvent(new Event("DOMContentLoaded")); } catch (e) {}
+    send({t: "shown"});
+  }
+
+  function handle(m) {
+    if (!m || !m.t) return;
+    if (m.t === "part") {                       // big messages come in parts
+      var p = parts[m.id] = parts[m.id] || [];
+      p[m.i] = m.d;
+      var have = 0; for (var i = 0; i < m.n; i++) if (p[i] != null) have++;
+      if (have === m.n) { delete parts[m.id]; handle(JSON.parse(p.join(""))); }
+      else if (!booted) say("Loading ConnorOS… " + Math.round(have / m.n * 100) + "%");
+      if (!booted && have === 1) send({t: "status", text: "receiving ConnorOS in " + m.n + " parts"});
+      return;
+    }
+    if (m.t === "bundle") boot(m);
+    else if (m.t === "ev") deliver(m.m);
+    else if (m.t === "evs") m.ms.forEach(deliver);
+    else if (m.t === "res" && waiting[m.id]) { var ok = waiting[m.id]; delete waiting[m.id]; ok(new Response(m.body || "", {status: m.status || 200})); }
+  }
+
+  window.addEventListener("error", function (e) { send({t: "error", text: (e.message || "error") + " " + (e.filename || "") + ":" + (e.lineno || "")}); });
+  ctx.addCustomMessageListener(NS, function (ev) { handle(typeof ev.data === "string" ? JSON.parse(ev.data) : ev.data); });
+  ctx.addEventListener(cast.framework.system.EventType.SENDER_CONNECTED, function () { if (!booted) { say("Connected to ConnorOS. Loading…"); send({t: "hello"}); } });
+  var opts = new cast.framework.CastReceiverOptions();
+  opts.customNamespaces = {};
+  opts.customNamespaces[NS] = cast.framework.system.MessageType.JSON;
+  opts.disableIdleTimeout = true;
+  opts.skipPlayersLoad = true;
+  ctx.start(opts);
+  setTimeout(function () { if (!booted) send({t: "hello"}); }, 1500);
+  setInterval(function () { if (!booted) send({t: "hello"}); }, 8000);
+})();
+</script>
+</body>
+</html>
